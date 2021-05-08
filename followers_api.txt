@@ -1,0 +1,185 @@
+import os
+import time
+import tweepy
+from flask import Flask, request, render_template, redirect, abort, flash, jsonify
+from flask_cors import CORS, cross_origin  # This is the magic
+from bson import json_util
+import json
+import pandas as pd
+import psycopg2 as pg
+import pandas.io.sql as psql
+import datetime
+from psycopg2.extras import RealDictCursor
+import numpy as np
+import networkx as nx
+import re
+from collections import Counter
+import csv
+import json
+import tweepy
+import time
+
+app = Flask(__name__)   # create our flask app
+CORS(app)
+app.config['CORS_HEADERS'] = 'Content-Type'
+
+def search_user(string1,string2=None,string3=None,string4=None):
+    import psycopg2 as pg
+    from psycopg2.extras import RealDictCursor
+    import pandas as pd
+    connection = pg.connect(dbname="platform", user="ps", password="ps@123", host="172.20.1.51", port="6011")
+
+    df_user = pd.read_sql("SELECT * FROM sm_user WHERE sm_screen_name LIKE '%"+string1+"%'"
+                          ,con= connection)
+    df_user['sm_user_name'] = df_user['sm_user_name'].str.lower()
+    df_user['sm_location']=df_user['sm_location'].str.lower()
+    
+    if string2 is not None:
+        df_user=df_user[df_user['sm_user_name'].str.contains(string2,na=False)]
+    
+    if string3 is not None:
+        df_user=df_user[df_user['sm_location'].str.contains(string3,na=False)]
+    
+    if string4 is not None:
+        df_user.loc[df_user['sm_channel_id'] == string4]
+    
+    user=df_user['sm_screen_name'].iloc[0]
+    
+    
+    result=df_user.to_json(orient="index")
+    parsed = json.loads(result)
+
+    # user 5 tweets
+    # configure Twitter API
+    consumer_key = "lKPbSIynHJeYcMfsiXIJuayCd"
+    consumer_secret = "QDFkW07TwnNfm5sVP0poR1sqfe0FVrFQQD1qBQtx6K3kfSP67a"
+    access_token = "1197604244-G9qyiTNfs9V1VPKtRkz8rv0YaxdMc9vPovNU6Dw"
+    access_token_secret = "9ahcXDBj76JQetdTxQL3hvyE6BoqRn9wfW1tUn9rCMmWf"
+    # Authenticate twitter Api
+    auth = tweepy.OAuthHandler(consumer_key, consumer_secret)
+    auth.set_access_token(access_token, access_token_secret)
+
+    
+    api = tweepy.API(auth)
+    result = []
+    for tweet in api.user_timeline(id=user, count=5):
+        result.append({
+            "sm_text": tweet.text,
+            "created_at": tweet.created_at,
+            "social_user": {
+                "sm_profile_image_url": tweet.user.profile_image_url,
+                "sm_user_name": tweet.user.name,
+                "sm_social_user_id": tweet.user.id_str,
+                "sm_screen_name": tweet.user.screen_name
+            },
+            "channel": {
+                "sm_name": "Twitter",
+                "id": 1
+            },
+            "sm_status_created_on": tweet.created_at,
+            "sm_media": [],
+            "sm_text": tweet.text,
+            "sm_social_id": tweet.id_str,
+            "sm_shared_count":tweet.retweet_count,
+            "sm_favorite_count":tweet.favorite_count
+         })
+        
+    
+    def getIntForString(s):
+        r = ''
+        for c in s:
+            r = r + str(ord(c))
+    
+        return r
+
+    def getFollowers(api, root_user, no_of_followers):
+        primary_followers = []
+        counter = True
+
+        while counter == True:
+            try:
+                newUser = api.get_user(root_user)
+                followers = newUser.followers()
+                for index in range(no_of_followers):
+                    primary_followers.append((str(followers[index].screen_name), root_user))
+                counter == False
+                return primary_followers
+            except (tweepy.error.RateLimitError):
+                print("Sleeping on getFollowers. Please wait")
+                time.sleep(15*60)
+
+    def getSecondaryFollowers(api, followers_list, no_of_followers):
+        secondary_followers = []
+        counter = True
+
+        while counter == True:
+            try:
+                for user in followers_list:
+                    try:
+                        newUser = api.get_user(user[0])
+                        followers = newUser.followers()
+                        count = 0
+
+                        for username in followers:
+                            if count < no_of_followers:
+                                secondary_followers.append((username.screen_name, user[0]))
+                                count += 1
+                    except (tweepy.TweepError):
+                        print ("Not authorized to view user. Skipping to next user")
+                        pass
+                counter == False
+
+                #print(secondary_followers)
+                return secondary_followers
+            except (tweepy.error.RateLimitError):
+                print ("Sleeping on getSecondaryFollowers. Please wait")
+                time.sleep(15*60)
+
+    def get_links(ROOT_USER,NO_OF_FOLLOWERS):
+        ROOT_USER = user
+        NO_OF_FOLLOWERS = 4
+
+        primary_followers = getFollowers(api, ROOT_USER, NO_OF_FOLLOWERS)
+        secondary_followers = getSecondaryFollowers(api, primary_followers, NO_OF_FOLLOWERS)
+        followers = primary_followers + secondary_followers
+    
+        unique_pairs = {tuple(sorted(x)) for x in followers} 
+        uniq=sorted(set().union(*unique_pairs))
+
+        my_dict=[]
+        for n in uniq:
+            a={'id': getIntForString(n),'name':n,'size' : 10}
+            my_dict.append(a)
+    
+        ntwrk=[]
+        for pair in unique_pairs:
+            b={"source_id" : getIntForString(pair[0]),"source" : pair[0],"destination_id" : getIntForString(pair[1]),"destination" : pair[1]}
+            ntwrk.append(b)
+        
+        #return my_dict, ntwrk
+            
+    templateData = {
+        'user_data' : parsed,
+        'user_Tweets' : result,
+        'edges' : ntwrk,
+        'sizes' : my_dict
+    }
+    
+    return(json.dumps(templateData,default=json_util.default))
+
+@app.route('/social_media/profile_search',methods=['GET','POST'])
+@cross_origin()
+def add_message():
+    request.get_json(force=True)
+    content = request.json
+    records = None
+
+    if content["hashtag"]:
+        print(content["hashtag"])
+        records = get_graph(content["hashtag"])
+        return records
+    else:
+        return jsonify({})
+
+app.debug = True
+app.run(host='0.0.0.0', port=6021,debug=True)

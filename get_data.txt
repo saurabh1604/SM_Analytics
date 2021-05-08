@@ -1,0 +1,127 @@
+import pandas as pd
+pd.options.mode.chained_assignment = None
+import psycopg2 as pg
+import pandas.io.sql as psql
+import datetime
+from psycopg2.extras import RealDictCursor
+import numpy as np
+%matplotlib inline
+import matplotlib.pyplot as plt
+import networkx as nx
+import re
+from collections import Counter
+
+def get_graph(searchstring):
+    params = {
+    # all rows after this timestamp, 1 day ago relative to 'now'
+        'earliest': datetime.datetime.now() - datetime.timedelta(days=1),
+        }
+
+    conn = pg.connect(dbname="platform", user="ps", password="ps@123", host="172.20.1.51", port="6011")
+    cur = conn.cursor()
+    sqlQuery = "SELECT * FROM sm_hashtag WHERE sm_name like '%"+searchstring+"%'"
+    cur.execute(sqlQuery)
+    df_hashtag = pd.DataFrame(cur.fetchall())
+    #print(df_hashtag)
+    df_hashtag.columns=['id','sm_name','f_created_on','f_updated_on','f_created_by','f_updated_by']
+
+    df_user = pd.read_sql("""
+                 select "id","sm_user_name","sm_screen_name","sm_description","sm_location","sm_follower_count","sm_status_count","f_created_on" from sm_user
+                 where f_created_on >= %(earliest)s""",params=params,con= conn)
+
+    df_text = pd.read_sql("""
+                 select "sm_user_id","sm_text", "sm_hashtag_ids","f_created_on" from sm_status
+                 where f_created_on >= %(earliest)s""",params=params,con= conn)
+
+    df_text=pd.DataFrame({'sm_user_id':np.repeat(df_text.sm_user_id.values,df_text.sm_hashtag_ids.str.len()),
+                      'sm_text':np.repeat(df_text.sm_text.values,df_text.sm_hashtag_ids.str.len()),
+                            'sm_hashtag_ids':np.concatenate(df_text.sm_hashtag_ids.values)})
+
+    df_text['sm_hashtag_ids'] = df_text['sm_hashtag_ids'].astype(int)
+
+    df=pd.merge(df_user,df_text ,how='inner', left_on=['id'], right_on=['sm_user_id'])
+
+    df2=pd.merge(df,df_hashtag ,how='inner', left_on=['sm_hashtag_ids'], right_on=['id'])
+
+    dataset=df2[['sm_user_name','sm_screen_name','sm_description','sm_location','sm_follower_count','sm_status_count','f_created_on_x','sm_text']] 
+    dataset.columns = ['name', 'username','description','location','followers','numberstatuses','time','tweets']
+
+    retweets = []
+    actual_tweets = []
+    for user, tweet in zip(dataset['username'], dataset['tweets']):
+        match = re.search(r'^\bRT\b', tweet)
+        if match == None:
+            actual_tweets.append([user,tweet])
+        else:
+            retweets.append([user,tweet])   
+
+    actual_tweets = np.array(actual_tweets)
+    retweets = np.array(retweets)
+
+    in_set = []
+    not_in_set = []
+    for record in actual_tweets:
+        match = re.findall(r'@\w*', record[1])
+        if match != []:
+            for name in match:
+                if (name[1:] in dataset['username'].unique()) and (record[0] != name[1:]):
+                    in_set.append([record[0], name[1:]])
+                elif record[0] != name[1:]:
+                    not_in_set.append([record[0], name[1:]])
+
+    in_set = np.array(in_set)
+    not_in_set = np.array(not_in_set)
+    
+    sender_count = Counter(not_in_set[:,0])
+    receiver_count = Counter(not_in_set[:,1])
+    top_5_senders = sender_count.most_common(5)
+    top_5_receivers = receiver_count.most_common(5)
+
+    graph = nx.Graph()
+
+    all_users = list(set(not_in_set[:,0]) | set(not_in_set[:,1]))
+    graph.add_nodes_from(all_users, count=10)
+    node_colours = []
+
+    for node in graph.nodes():
+        if node in (set(not_in_set[:,0]) & set(not_in_set[:,1])):
+            node_colours.append('g')
+        elif node in np.unique(not_in_set[:,0]):
+            node_colours.append('r')
+        elif node in np.unique(not_in_set[:,1]):
+            node_colours.append('b')
+        
+    edges = {}
+    occurrence_count = Counter(map(tuple, not_in_set))
+    for (sender, receiver), count in occurrence_count.items():
+        if (receiver, sender) in edges.keys():
+            edges[(receiver, sender)] = edges[(receiver, sender)] + count
+        else:
+            edges[(sender, receiver)] = count
+        
+    for (sender, receiver), count in edges.items():
+        graph.add_edge(sender, receiver, weight=count)
+    
+    followers = {}
+    tweet_num = {}
+    for username in all_users:
+        followers[username] = dataset[dataset['username'] == username]['followers'].unique()
+        tweet_num[username] = dataset[dataset['username'] == username]['tweets'].count()
+
+    sizes=[]
+    for n in graph.nodes():
+        a = [n,(followers[n] / tweet_num[n]) * 50]
+    #sizes.extend(a)
+        if len(a[0])> 0  and len(((followers[n] / tweet_num[n]) * 50))  > 0 : 
+        #print(a[0],int(a[1][0]))
+            b = a[0]+" "+str(int(a[1][0]))
+            sizes.append(b)
+        elif len(a[0])> 0 :
+            c = a[0]+" "+"0"
+            sizes.append(c)
+#             break
+#         print(a)
+    print(len(sizes))
+    
+
+    return edges,sizes
